@@ -1,0 +1,184 @@
+//serial, LCD 2열 깜빡임 작동확인
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include <string.h>
+#include <stdio.h>
+
+// ==== LCD 관련 매크로 및 함수 정의 ====
+#define LCD_DATA PORTA
+#define LCD_INST PORTA
+#define LCD_CTRL PORTC
+#define RS 0x01
+#define EN 0x00
+
+void delay_us(unsigned char time_us) {
+    for (unsigned char i = 0; i < time_us; i++) {
+        asm volatile("PUSH R0"); asm volatile("POP R0");
+        asm volatile("PUSH R0"); asm volatile("POP R0");
+        asm volatile("PUSH R0"); asm volatile("POP R0");
+    }
+}
+
+void delay_ms(unsigned int time_ms) {
+    for (unsigned int i = 0; i < time_ms; i++) {
+        delay_us(250); delay_us(250); delay_us(250); delay_us(250);
+    }
+}
+
+char flip_bits(char ch) {
+    char r = 0;
+    r |= ((ch >> 3) & 0x10);
+    r |= ((ch >> 1) & 0x20);
+    r |= ((ch << 1) & 0x40);
+    r |= ((ch << 3) & 0x80);
+    return r;
+}
+
+void LCD_comm(char ch) {
+    LCD_INST = flip_bits(ch);
+    LCD_CTRL &= ~(1 << RS);
+    LCD_CTRL |= (1 << EN);
+    delay_us(1);
+    LCD_CTRL &= ~(1 << EN);
+    delay_us(5);
+
+    LCD_INST = flip_bits(ch << 4);
+    LCD_CTRL &= ~(1 << RS);
+    LCD_CTRL |= (1 << EN);
+    delay_us(1);
+    LCD_CTRL &= ~(1 << EN);
+    delay_ms(5);
+}
+
+void LCD_data(char ch) {
+    LCD_DATA = flip_bits(ch);
+    LCD_CTRL |= (1 << RS);
+    LCD_CTRL |= (1 << EN);
+    delay_us(1);
+    LCD_CTRL &= ~(1 << EN);
+    delay_us(20);
+
+    LCD_DATA = flip_bits(ch << 4);
+    LCD_CTRL |= (1 << RS);
+    LCD_CTRL |= (1 << EN);
+    delay_us(1);
+    LCD_CTRL &= ~(1 << EN);
+    delay_us(50);
+}
+
+void LCD_CHAR(char c) {
+    delay_ms(1);
+    LCD_data(c);
+}
+
+void LCD_STR(char *str) {
+    while (*str) LCD_CHAR(*str++);
+}
+
+void LCD_pos(char col, char row) {
+    LCD_comm(0x80 | (col + 0x40 * row));
+}
+
+void LCD_clear(void) {
+    LCD_comm(1);
+}
+
+void LCD_init(void) {
+    LCD_comm(0x20);
+    delay_ms(5);
+    LCD_comm(0x28);
+    delay_ms(5);
+    LCD_comm(0x0C);
+    delay_ms(5);
+    LCD_comm(0x06);
+    delay_ms(5);
+    LCD_clear();
+}
+
+// ==== UART 송신 관련 함수 ====
+void USART1_init(void) {
+    UCSR1A = 0x00;
+    UCSR1B = 0x18;  // RX, TX enable
+    UCSR1C = 0x06;  // 비동기, 8-bit, no parity
+    UBRR1H = 0x00;
+    UBRR1L = 0x08;  // Baud Rate 115200 (16MHz 기준)
+}
+
+void USART1_TX(unsigned char data) {
+    while (!(UCSR1A & (1 << UDRE1)));
+    UDR1 = data;
+}
+
+void USART1_TX_str(char *str) {
+    while (*str) USART1_TX(*str++);
+}
+
+// ==== LED 깜빡임 ====
+void blink_led() {
+    PORTG |= (1 << PG3);
+    delay_ms(100);
+    PORTG &= ~(1 << PG3);
+    delay_ms(100);
+}
+
+// ==== 메인 함수 ====
+int main(void) {
+    char prev_state = 255;
+   
+    DDRA = 0xF0;  // PA7~PA4: LCD, PA1: 입력
+
+    DDRC |= (1 << PC0) | (1 << PC1);
+    PORTC &= ~((1 << PC0) | (1 << PC1));
+
+    DDRG |= (1 << PG3);  // LED 출력
+    PORTG &= ~(1 << PG3);
+
+    LCD_init();
+    USART1_init();
+
+    LCD_pos(0, 0);
+    LCD_STR("XX NO PARKING XX");
+
+      uint16_t lcd_counter = 0; // 0.5초 깜빡임 타이머용
+
+    while (1) {
+        uint8_t sensor = !(PINA & (1 << PA1));
+
+        // 상태 변경 감지
+        if (sensor != prev_state) {
+            if (sensor) {
+                USART1_TX_str("WARNING : CAR IS PARKING\r\n");
+            } else {
+                LCD_pos(0, 1);
+                LCD_STR("                ");
+                USART1_TX_str("RELEASE WARNING : CAR MOVED\r\n");
+            }
+            prev_state = sensor;
+        }
+
+        // 감지 상태에 따른 동작
+        if (sensor) {
+            blink_led();        // LED는 0.1초마다 깜빡임
+            lcd_counter += 100; // 100ms 단위 증가
+
+            if (lcd_counter >= 500) {
+                static uint8_t lcd_on = 0;
+                lcd_on = !lcd_on;
+
+                LCD_pos(0, 1);
+                if (lcd_on) {
+                    LCD_STR("* MOVE THE CAR *");
+                } else {
+                    LCD_STR("                ");
+                }
+
+                lcd_counter = 0; // 0.5초마다 초기화
+            }
+
+        } else {
+            lcd_counter = 0; // 감지 안되면 타이머 초기화
+            delay_ms(100);   // LED 대신 딜레이
+        }
+    }
+}
